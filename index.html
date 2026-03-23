@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>リアルタイム コード検出</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', sans-serif;
+      background: #0f0f1a;
+      color: #e0e0ff;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 24px;
+    }
+
+    h1 {
+      font-size: 1.6rem;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      margin-bottom: 8px;
+      color: #a78bfa;
+    }
+
+    .subtitle {
+      font-size: 0.85rem;
+      color: #6b7280;
+      margin-bottom: 32px;
+    }
+
+    .card {
+      background: #1a1a2e;
+      border: 1px solid #2d2d4e;
+      border-radius: 16px;
+      padding: 32px;
+      width: 100%;
+      max-width: 600px;
+      margin-bottom: 20px;
+    }
+
+    .chord-display {
+      text-align: center;
+      padding: 40px 0;
+    }
+
+    .chord-name {
+      font-size: 5rem;
+      font-weight: 800;
+      color: #a78bfa;
+      letter-spacing: -0.02em;
+      min-height: 100px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.15s ease;
+    }
+
+    .chord-name.active {
+      color: #7c3aed;
+      text-shadow: 0 0 40px rgba(124, 58, 237, 0.6);
+    }
+
+    .chord-name.no-signal {
+      color: #374151;
+      font-size: 2rem;
+    }
+
+    .notes-display {
+      display: flex;
+      justify-content: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 12px;
+      min-height: 36px;
+    }
+
+    .note-chip {
+      background: #2d2d4e;
+      border: 1px solid #4f46e5;
+      border-radius: 20px;
+      padding: 4px 14px;
+      font-size: 0.9rem;
+      color: #818cf8;
+    }
+
+    .note-chip.root {
+      background: #4f46e5;
+      color: #fff;
+      border-color: #6366f1;
+    }
+
+    .controls {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      margin-top: 24px;
+    }
+
+    button {
+      padding: 12px 28px;
+      border-radius: 10px;
+      border: none;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    #startBtn {
+      background: #7c3aed;
+      color: #fff;
+    }
+    #startBtn:hover { background: #6d28d9; }
+    #startBtn:disabled { background: #374151; color: #6b7280; cursor: not-allowed; }
+
+    #stopBtn {
+      background: #1f2937;
+      color: #9ca3af;
+      border: 1px solid #374151;
+    }
+    #stopBtn:hover:not(:disabled) { background: #374151; }
+    #stopBtn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .visualizer-container {
+      margin-top: 20px;
+    }
+
+    .visualizer-label {
+      font-size: 0.75rem;
+      color: #6b7280;
+      margin-bottom: 6px;
+    }
+
+    canvas {
+      width: 100%;
+      height: 80px;
+      border-radius: 8px;
+      background: #0f0f1a;
+      display: block;
+    }
+
+    #freqCanvas {
+      height: 120px;
+    }
+
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      justify-content: center;
+      font-size: 0.85rem;
+      color: #6b7280;
+      margin-top: 16px;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #374151;
+    }
+
+    .dot.listening {
+      background: #10b981;
+      box-shadow: 0 0 8px rgba(16, 185, 129, 0.8);
+      animation: pulse 1.5s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
+    .candidates {
+      margin-top: 16px;
+    }
+
+    .candidates-label {
+      font-size: 0.75rem;
+      color: #6b7280;
+      margin-bottom: 8px;
+    }
+
+    .candidate-list {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .candidate-chip {
+      background: #111827;
+      border: 1px solid #1f2937;
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-size: 0.8rem;
+      color: #4b5563;
+    }
+
+    .candidate-chip.top {
+      border-color: #4f46e5;
+      color: #818cf8;
+    }
+
+    .sensitivity-control {
+      margin-top: 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 0.82rem;
+      color: #6b7280;
+    }
+
+    input[type=range] {
+      flex: 1;
+      accent-color: #7c3aed;
+    }
+  </style>
+</head>
+<body>
+  <h1>🎵 リアルタイム コード検出</h1>
+  <p class="subtitle">マイクから音を入力するとコードを識別します</p>
+
+  <div class="card">
+    <div class="chord-display">
+      <div class="chord-name no-signal" id="chordName">-- / --</div>
+      <div class="notes-display" id="notesDisplay"></div>
+    </div>
+
+    <div class="candidates">
+      <div class="candidates-label">候補コード</div>
+      <div class="candidate-list" id="candidateList"></div>
+    </div>
+
+    <div class="controls">
+      <button id="startBtn">▶ 開始</button>
+      <button id="stopBtn" disabled>⏹ 停止</button>
+    </div>
+
+    <div class="status">
+      <div class="dot" id="statusDot"></div>
+      <span id="statusText">停止中</span>
+    </div>
+
+    <div class="sensitivity-control">
+      <span>感度</span>
+      <input type="range" id="sensitivitySlider" min="1" max="10" value="5">
+      <span id="sensitivityValue">5</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="visualizer-label">周波数スペクトラム</div>
+    <canvas id="freqCanvas"></canvas>
+    <div class="visualizer-label" style="margin-top:12px">波形</div>
+    <canvas id="waveCanvas"></canvas>
+  </div>
+
+  <script src="chord-detector.js"></script>
+</body>
+</html>
