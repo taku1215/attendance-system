@@ -1,109 +1,88 @@
 /**
  * Real-time Audio Chord Detector
- * Uses Web Audio API + FFT for frequency analysis and chord recognition
+ * Web Audio API + FFT + harmonic suppression + vote-based stabilization
  */
 
 // ─── Note / Chord Definitions ────────────────────────────────────────────────
 
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 
-// Chord templates: semitone intervals from root (excluding root = 0)
 const CHORD_TEMPLATES = [
-  // Triads
-  { name: '',      intervals: [4, 7],       quality: 'major' },
-  { name: 'm',     intervals: [3, 7],       quality: 'minor' },
-  { name: 'dim',   intervals: [3, 6],       quality: 'dim' },
-  { name: 'aug',   intervals: [4, 8],       quality: 'aug' },
-  { name: 'sus2',  intervals: [2, 7],       quality: 'sus' },
-  { name: 'sus4',  intervals: [5, 7],       quality: 'sus' },
-  // 7ths
-  { name: 'maj7',  intervals: [4, 7, 11],   quality: 'major' },
-  { name: '7',     intervals: [4, 7, 10],   quality: 'dominant' },
-  { name: 'm7',    intervals: [3, 7, 10],   quality: 'minor' },
-  { name: 'm7b5',  intervals: [3, 6, 10],   quality: 'dim' },
-  { name: 'dim7',  intervals: [3, 6, 9],    quality: 'dim' },
-  { name: 'mmaj7', intervals: [3, 7, 11],   quality: 'minor' },
-  { name: 'add9',  intervals: [4, 7, 14],   quality: 'major' },
-  { name: 'm9',    intervals: [3, 7, 10, 14], quality: 'minor' },
-  { name: '9',     intervals: [4, 7, 10, 14], quality: 'dominant' },
+  { name: '',      intervals: [4, 7]          },
+  { name: 'm',     intervals: [3, 7]          },
+  { name: 'dim',   intervals: [3, 6]          },
+  { name: 'aug',   intervals: [4, 8]          },
+  { name: 'sus2',  intervals: [2, 7]          },
+  { name: 'sus4',  intervals: [5, 7]          },
+  { name: 'maj7',  intervals: [4, 7, 11]      },
+  { name: '7',     intervals: [4, 7, 10]      },
+  { name: 'm7',    intervals: [3, 7, 10]      },
+  { name: 'm7b5',  intervals: [3, 6, 10]      },
+  { name: 'dim7',  intervals: [3, 6, 9]       },
+  { name: 'add9',  intervals: [4, 7, 14]      },
 ];
 
-// ─── Frequency → Note conversion ─────────────────────────────────────────────
-
-function freqToMidi(freq) {
-  return 69 + 12 * Math.log2(freq / 440);
-}
-
-function freqToNoteName(freq) {
-  const midi = Math.round(freqToMidi(freq));
-  return NOTE_NAMES[((midi % 12) + 12) % 12];
-}
+// ─── Frequency Helpers ────────────────────────────────────────────────────────
 
 function freqToNoteClass(freq) {
-  const midi = Math.round(freqToMidi(freq));
-  return ((midi % 12) + 12) % 12; // 0=C, 1=C#, ...
+  const midi = Math.round(69 + 12 * Math.log2(freq / 440));
+  return ((midi % 12) + 12) % 12;
 }
 
-// ─── Peak Detection ───────────────────────────────────────────────────────────
+// ─── Peak Detection with Harmonic Suppression ─────────────────────────────────
 
-/**
- * Find spectral peaks using Harmonic Product Spectrum (HPS)
- * Returns array of { freq, magnitude } sorted by magnitude descending
- */
-function findSpectralPeaks(freqData, sampleRate, fftSize, threshold) {
-  const binCount = freqData.length;
-  const binFreq = sampleRate / fftSize;
-  const peaks = [];
+function findPeaks(floatFreqData, sampleRate, fftSize, thresholdRatio) {
+  const binCount  = floatFreqData.length;
+  const binFreq   = sampleRate / fftSize;
+  const MIN_FREQ  = 55;   // A1 – lowest practical note
+  const MAX_FREQ  = 2000; // limit to reduce false harmonics
+  const minBin    = Math.ceil(MIN_FREQ / binFreq);
+  const maxBin    = Math.min(Math.floor(MAX_FREQ / binFreq), binCount - 1);
 
-  // Convert dB to linear magnitude
-  const linear = new Float32Array(binCount);
-  for (let i = 0; i < binCount; i++) {
-    linear[i] = Math.pow(10, freqData[i] / 20);
-  }
+  // dB → linear
+  const lin = new Float32Array(binCount);
+  for (let i = 0; i < binCount; i++) lin[i] = Math.pow(10, floatFreqData[i] / 20);
 
-  const minFreq = 60;   // Hz - below this is noise
-  const maxFreq = 4000; // Hz - above this less relevant for chords
-  const minBin = Math.ceil(minFreq / binFreq);
-  const maxBin = Math.min(Math.floor(maxFreq / binFreq), binCount - 1);
+  // 3-point moving average
+  const sm = new Float32Array(binCount);
+  for (let i = 1; i < binCount - 1; i++) sm[i] = (lin[i-1] + lin[i]*2 + lin[i+1]) / 4;
 
-  // Smooth the spectrum slightly
-  const smoothed = new Float32Array(binCount);
-  for (let i = 1; i < binCount - 1; i++) {
-    smoothed[i] = (linear[i - 1] + linear[i] * 2 + linear[i + 1]) / 4;
-  }
-
-  // Dynamic noise floor
+  // dynamic noise floor
   let maxMag = 0;
-  for (let i = minBin; i <= maxBin; i++) {
-    if (smoothed[i] > maxMag) maxMag = smoothed[i];
+  for (let i = minBin; i <= maxBin; i++) if (sm[i] > maxMag) maxMag = sm[i];
+  const floor = maxMag * thresholdRatio;
+
+  // local maxima
+  const peaks = [];
+  for (let i = minBin + 1; i < maxBin; i++) {
+    if (sm[i] > sm[i-1] && sm[i] > sm[i+1] && sm[i] > floor) {
+      const a = sm[i-1], b = sm[i], c = sm[i+1];
+      const off = (a - c) / (2*(a - 2*b + c) + 1e-10);
+      peaks.push({ freq: (i + off) * binFreq, mag: sm[i] });
+    }
   }
 
-  const noiseFloor = maxMag * threshold;
+  peaks.sort((a, b) => b.mag - a.mag);
 
-  // Find local maxima
-  for (let i = minBin + 1; i < maxBin; i++) {
-    if (
-      smoothed[i] > smoothed[i - 1] &&
-      smoothed[i] > smoothed[i + 1] &&
-      smoothed[i] > noiseFloor
-    ) {
-      // Parabolic interpolation for sub-bin accuracy
-      const alpha = smoothed[i - 1];
-      const beta  = smoothed[i];
-      const gamma = smoothed[i + 1];
-      const offset = (alpha - gamma) / (2 * (alpha - 2 * beta + gamma) + 1e-10);
-      const exactBin = i + offset;
-      const freq = exactBin * binFreq;
-
-      if (freq >= minFreq && freq <= maxFreq) {
-        peaks.push({ freq, magnitude: smoothed[i] });
+  // Harmonic suppression: remove peaks that are 2x/3x/4x/5x of a stronger peak
+  const keep = [];
+  const suppressed = new Set();
+  for (let i = 0; i < peaks.length; i++) {
+    if (suppressed.has(i)) continue;
+    keep.push(peaks[i]);
+    for (let j = i + 1; j < peaks.length; j++) {
+      if (suppressed.has(j)) continue;
+      const ratio = peaks[j].freq / peaks[i].freq;
+      for (let h = 2; h <= 5; h++) {
+        if (Math.abs(ratio - h) / h < 0.04) { // 4% tolerance
+          suppressed.add(j);
+          break;
+        }
       }
     }
   }
 
-  // Sort by magnitude and return top peaks
-  peaks.sort((a, b) => b.magnitude - a.magnitude);
-  return peaks.slice(0, 12);
+  return keep.slice(0, 6); // keep only top 6 fundamentals
 }
 
 // ─── Chord Matching ───────────────────────────────────────────────────────────
@@ -113,46 +92,32 @@ function matchChord(noteClasses) {
 
   const results = [];
 
-  // Try each detected note as root
-  for (const rootClass of noteClasses) {
-    for (const template of CHORD_TEMPLATES) {
-      let score = 0;
-      let matched = 0;
-      let penalties = 0;
+  for (const root of noteClasses) {
+    for (const tpl of CHORD_TEMPLATES) {
+      const chordNotes = new Set([root, ...tpl.intervals.map(i => (root + i) % 12)]);
+      const chordArr   = [...chordNotes];
 
-      const requiredNotes = new Set([rootClass]);
-      for (const interval of template.intervals) {
-        requiredNotes.add((rootClass + interval) % 12);
-      }
+      let hits = 0;
+      for (const n of chordArr)   if (noteClasses.includes(n)) hits++;
+      const coverage = hits / chordArr.length;
+      if (coverage < 0.65) continue;
 
-      // Score: reward presence of chord tones, penalize missing ones
-      for (const required of requiredNotes) {
-        if (noteClasses.includes(required)) {
-          matched++;
-          score += (required === rootClass) ? 2 : 1;
-        } else {
-          penalties++;
-        }
-      }
+      // Extra note penalty – only count notes NOT in chord
+      let extra = 0;
+      for (const n of noteClasses) if (!chordNotes.has(n)) extra++;
 
-      // Penalize extra notes not in chord
-      for (const detected of noteClasses) {
-        if (!requiredNotes.has(detected)) {
-          score -= 0.5;
-        }
-      }
+      // Root presence bonus
+      const rootPresent = noteClasses.includes(root) ? 1 : 0;
 
-      const coverage = matched / requiredNotes.size;
-      if (coverage >= 0.6) {
-        results.push({
-          root: NOTE_NAMES[rootClass],
-          type: template.name,
-          quality: template.quality,
-          score: score - penalties * 0.3,
-          coverage,
-          fullName: NOTE_NAMES[rootClass] + template.name,
-        });
-      }
+      const score = coverage * 10 + rootPresent * 3 - extra * 0.8;
+      results.push({
+        root: NOTE_NAMES[root],
+        type: tpl.name,
+        score,
+        coverage,
+        fullName: NOTE_NAMES[root] + tpl.name,
+        chordNotes,
+      });
     }
   }
 
@@ -160,199 +125,172 @@ function matchChord(noteClasses) {
   return results.slice(0, 5);
 }
 
-// ─── Audio Engine ─────────────────────────────────────────────────────────────
+// ─── Vote Buffer for Stabilization ───────────────────────────────────────────
 
-const FFT_SIZE = 8192;
-const SMOOTHING = 0.75;
-const DETECT_INTERVAL_MS = 80;
+const VOTE_WINDOW = 5;
+const voteBuffer = [];
 
-let audioCtx = null;
-let analyser = null;
-let mediaStream = null;
-let animFrameId = null;
-let detectIntervalId = null;
-let isRunning = false;
+function castVote(name) {
+  voteBuffer.push(name);
+  if (voteBuffer.length > VOTE_WINDOW) voteBuffer.shift();
 
-// DOM refs
-const chordNameEl   = document.getElementById('chordName');
+  const counts = {};
+  for (const v of voteBuffer) counts[v] = (counts[v] || 0) + 1;
+
+  const [topName, topCount] = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+  if (topCount >= Math.ceil(VOTE_WINDOW * 0.5)) return topName;
+  return null;
+}
+
+function resetVotes() { voteBuffer.length = 0; }
+
+// ─── Audio / Visualizer Engine ────────────────────────────────────────────────
+
+const FFT_SIZE    = 8192;
+const SMOOTHING   = 0.82;
+const DETECT_MS   = 75;
+
+let audioCtx = null, analyser = null, mediaStream = null;
+let animFrameId = null, detectIntervalId = null, isRunning = false;
+
+const chordNameEl    = document.getElementById('chordName');
 const notesDisplayEl = document.getElementById('notesDisplay');
 const candidateListEl = document.getElementById('candidateList');
-const startBtn      = document.getElementById('startBtn');
-const stopBtn       = document.getElementById('stopBtn');
-const statusDot     = document.getElementById('statusDot');
-const statusText    = document.getElementById('statusText');
-const freqCanvas    = document.getElementById('freqCanvas');
-const waveCanvas    = document.getElementById('waveCanvas');
-const slider        = document.getElementById('sensitivitySlider');
-const sliderVal     = document.getElementById('sensitivityValue');
+const startBtn       = document.getElementById('startBtn');
+const stopBtn        = document.getElementById('stopBtn');
+const statusDot      = document.getElementById('statusDot');
+const statusText     = document.getElementById('statusText');
+const freqCanvas     = document.getElementById('freqCanvas');
+const waveCanvas     = document.getElementById('waveCanvas');
+const slider         = document.getElementById('sensitivitySlider');
+const sliderVal      = document.getElementById('sensitivityValue');
 
-const freqCtx  = freqCanvas.getContext('2d');
-const waveCtx  = waveCanvas.getContext('2d');
+const freqCtx = freqCanvas.getContext('2d');
+const waveCtx = waveCanvas.getContext('2d');
 
-// Sensitivity: maps 1-10 to threshold 0.25 (low sensitivity) → 0.02 (high)
-function getSensitivityThreshold() {
-  const v = parseInt(slider.value);
-  return 0.27 - v * 0.025;
+// Sensitivity slider: value 1→10 maps threshold 0.22→0.02
+function getThreshold() {
+  return 0.24 - parseInt(slider.value) * 0.022;
 }
 
-slider.addEventListener('input', () => {
-  sliderVal.textContent = slider.value;
-});
+slider.addEventListener('input', () => { sliderVal.textContent = slider.value; });
 
-// ─── Visualization ────────────────────────────────────────────────────────────
+// ─── Drawing ──────────────────────────────────────────────────────────────────
 
-function resizeCanvas(canvas) {
-  const rect = canvas.parentElement.getBoundingClientRect();
-  canvas.width  = rect.width * devicePixelRatio;
-  canvas.height = canvas.offsetHeight * devicePixelRatio;
+function resizeCanvas(c) {
+  const r = c.parentElement.getBoundingClientRect();
+  c.width  = r.width  * devicePixelRatio;
+  c.height = c.offsetHeight * devicePixelRatio;
 }
 
-function drawFreqBars(freqData) {
+function drawBars(byteData) {
   resizeCanvas(freqCanvas);
-  const w = freqCanvas.width;
-  const h = freqCanvas.height;
+  const w = freqCanvas.width, h = freqCanvas.height;
   freqCtx.clearRect(0, 0, w, h);
-
-  const binCount = Math.min(freqData.length, 512);
-  const barW = w / binCount;
-
-  for (let i = 0; i < binCount; i++) {
-    const val = (freqData[i] + 140) / 140; // normalize from dB
-    const barH = Math.max(0, val * h);
-
-    const hue = 260 + i / binCount * 60;
-    freqCtx.fillStyle = `hsla(${hue}, 80%, 60%, 0.85)`;
-    freqCtx.fillRect(i * barW, h - barH, barW - 0.5, barH);
+  const count = Math.min(byteData.length, 600);
+  const bw = w / count;
+  for (let i = 0; i < count; i++) {
+    const v = byteData[i] / 255;
+    const hue = 255 + (i / count) * 60;
+    freqCtx.fillStyle = `hsla(${hue},80%,60%,0.9)`;
+    freqCtx.fillRect(i * bw, h - v * h, bw - 0.5, v * h);
   }
 }
 
-function drawWaveform(timeData) {
+function drawWave(byteData) {
   resizeCanvas(waveCanvas);
-  const w = waveCanvas.width;
-  const h = waveCanvas.height;
+  const w = waveCanvas.width, h = waveCanvas.height;
   waveCtx.clearRect(0, 0, w, h);
-
   waveCtx.strokeStyle = '#7c3aed';
   waveCtx.lineWidth = 2;
   waveCtx.beginPath();
-
-  const slice = w / timeData.length;
-  let x = 0;
-  for (let i = 0; i < timeData.length; i++) {
-    const v = timeData[i] / 128.0;
-    const y = (v * h) / 2;
-    i === 0 ? waveCtx.moveTo(x, y) : waveCtx.lineTo(x, y);
-    x += slice;
+  const step = w / byteData.length;
+  for (let i = 0; i < byteData.length; i++) {
+    const y = (byteData[i] / 128) * (h / 2);
+    i ? waveCtx.lineTo(i * step, y) : waveCtx.moveTo(0, y);
   }
   waveCtx.stroke();
 }
 
 // ─── Detection Loop ───────────────────────────────────────────────────────────
 
-let lastChordName = '';
-let stableCount = 0;
-const STABLE_THRESHOLD = 2; // require N consecutive same detections
+let silenceCount = 0;
 
 function runDetection() {
   if (!analyser) return;
 
-  const freqData = new Float32Array(analyser.frequencyBinCount);
-  analyser.getFloatFrequencyData(freqData);
+  const floatData = new Float32Array(analyser.frequencyBinCount);
+  analyser.getFloatFrequencyData(floatData);
 
-  const threshold = getSensitivityThreshold();
-  const peaks = findSpectralPeaks(freqData, audioCtx.sampleRate, FFT_SIZE, threshold);
+  const peaks = findPeaks(floatData, audioCtx.sampleRate, FFT_SIZE, getThreshold());
 
   if (peaks.length < 2) {
-    if (++stableCount > 5) {
+    silenceCount++;
+    if (silenceCount > 8) {
+      resetVotes();
       chordNameEl.className = 'chord-name no-signal';
       chordNameEl.textContent = '♩';
       notesDisplayEl.innerHTML = '';
       candidateListEl.innerHTML = '';
-      lastChordName = '';
-      stableCount = 0;
+      silenceCount = 0;
     }
     return;
   }
+  silenceCount = 0;
 
-  // Group peaks into note classes
-  const noteClassMap = new Map();
-  for (const peak of peaks) {
-    if (peak.freq < 60 || peak.freq > 4000) continue;
-    const nc = freqToNoteClass(peak.freq);
-    const existing = noteClassMap.get(nc);
-    if (!existing || peak.magnitude > existing.magnitude) {
-      noteClassMap.set(nc, peak);
-    }
+  // Deduplicate by note class, keep highest magnitude per class
+  const ncMap = new Map();
+  for (const p of peaks) {
+    const nc = freqToNoteClass(p.freq);
+    if (!ncMap.has(nc) || p.mag > ncMap.get(nc).mag) ncMap.set(nc, p);
   }
 
-  const noteClasses = [...noteClassMap.keys()];
+  // Sort note classes by magnitude (strongest first) and take top 5
+  const noteClasses = [...ncMap.entries()]
+    .sort((a, b) => b[1].mag - a[1].mag)
+    .slice(0, 5)
+    .map(([nc]) => nc);
+
   const candidates = matchChord(noteClasses);
+  if (candidates.length === 0) { castVote('?'); return; }
 
-  if (candidates.length === 0) {
-    chordNameEl.className = 'chord-name no-signal';
-    chordNameEl.textContent = '?';
-    return;
-  }
+  const best      = candidates[0];
+  const displayed = castVote(best.fullName);
+  if (!displayed) return; // not enough consensus yet
 
-  const best = candidates[0];
-
-  // Stability filter
-  if (best.fullName !== lastChordName) {
-    stableCount = 1;
-    lastChordName = best.fullName;
-    return;
-  }
-  stableCount++;
-  if (stableCount < STABLE_THRESHOLD) return;
-
-  // Update chord display
+  // Update chord name
   chordNameEl.className = 'chord-name active';
-  chordNameEl.textContent = best.fullName;
+  chordNameEl.textContent = displayed;
 
-  // Show detected notes
+  // Show notes
   notesDisplayEl.innerHTML = '';
-  const chordNoteClasses = new Set([NOTE_NAMES.indexOf(best.root)]);
-  // Reconstruct chord notes for highlighting
-  const tmpl = CHORD_TEMPLATES.find(t => t.name === best.type);
-  if (tmpl) {
-    const rootIdx = NOTE_NAMES.indexOf(best.root);
-    for (const interval of tmpl.intervals) {
-      chordNoteClasses.add((rootIdx + interval) % 12);
-    }
-  }
-
-  const shownNotes = new Set();
-  for (const [nc] of noteClassMap) {
-    if (shownNotes.has(nc)) continue;
-    shownNotes.add(nc);
+  for (const nc of noteClasses) {
     const chip = document.createElement('span');
-    chip.className = 'note-chip' + (nc === NOTE_NAMES.indexOf(best.root) ? ' root' : '');
+    const isRoot = NOTE_NAMES[nc] === best.root;
+    chip.className = 'note-chip' + (isRoot ? ' root' : '');
     chip.textContent = NOTE_NAMES[nc];
     notesDisplayEl.appendChild(chip);
   }
 
   // Show candidates
   candidateListEl.innerHTML = '';
-  candidates.forEach((c, idx) => {
+  candidates.forEach((c, i) => {
     const chip = document.createElement('span');
-    chip.className = 'candidate-chip' + (idx < 3 ? ' top' : '');
+    chip.className = 'candidate-chip' + (i < 3 ? ' top' : '');
     chip.textContent = c.fullName;
     candidateListEl.appendChild(chip);
   });
 }
 
-function animationLoop() {
+function animLoop() {
   if (!isRunning) return;
-
-  const freqData = new Uint8Array(analyser.frequencyBinCount);
-  const timeData = new Uint8Array(analyser.fftSize);
-  analyser.getByteFrequencyData(freqData);
-  analyser.getByteTimeDomainData(timeData);
-
-  drawFreqBars(new Float32Array(freqData).map(v => (v / 128) * 70 - 70));
-  drawWaveform(timeData);
-
-  animFrameId = requestAnimationFrame(animationLoop);
+  const freq = new Uint8Array(analyser.frequencyBinCount);
+  const wave = new Uint8Array(analyser.fftSize);
+  analyser.getByteFrequencyData(freq);
+  analyser.getByteTimeDomainData(wave);
+  drawBars(freq);
+  drawWave(wave);
+  animFrameId = requestAnimationFrame(animLoop);
 }
 
 // ─── Start / Stop ─────────────────────────────────────────────────────────────
@@ -360,25 +298,23 @@ function animationLoop() {
 async function startDetection() {
   try {
     mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    analyser = audioCtx.createAnalyser();
-    analyser.fftSize = FFT_SIZE;
+    audioCtx    = new (window.AudioContext || window.webkitAudioContext)();
+    analyser    = audioCtx.createAnalyser();
+    analyser.fftSize               = FFT_SIZE;
     analyser.smoothingTimeConstant = SMOOTHING;
 
-    const source = audioCtx.createMediaStreamSource(mediaStream);
-    source.connect(analyser);
+    audioCtx.createMediaStreamSource(mediaStream).connect(analyser);
 
     isRunning = true;
     startBtn.disabled = true;
-    stopBtn.disabled = false;
-    statusDot.className = 'dot listening';
+    stopBtn.disabled  = false;
+    statusDot.className  = 'dot listening';
     statusText.textContent = '🎤 聴取中...';
-    chordNameEl.className = 'chord-name no-signal';
+    chordNameEl.className  = 'chord-name no-signal';
     chordNameEl.textContent = '♩';
 
-    detectIntervalId = setInterval(runDetection, DETECT_INTERVAL_MS);
-    animationLoop();
+    detectIntervalId = setInterval(runDetection, DETECT_MS);
+    animLoop();
   } catch (err) {
     alert('マイクへのアクセスが拒否されました: ' + err.message);
   }
@@ -388,26 +324,19 @@ function stopDetection() {
   isRunning = false;
   clearInterval(detectIntervalId);
   cancelAnimationFrame(animFrameId);
-
-  if (mediaStream) {
-    mediaStream.getTracks().forEach(t => t.stop());
-    mediaStream = null;
-  }
-  if (audioCtx) {
-    audioCtx.close();
-    audioCtx = null;
-    analyser = null;
-  }
+  mediaStream?.getTracks().forEach(t => t.stop());
+  audioCtx?.close();
+  mediaStream = audioCtx = analyser = null;
+  resetVotes();
 
   startBtn.disabled = false;
-  stopBtn.disabled = true;
-  statusDot.className = 'dot';
+  stopBtn.disabled  = true;
+  statusDot.className    = 'dot';
   statusText.textContent = '停止中';
-  chordNameEl.className = 'chord-name no-signal';
+  chordNameEl.className  = 'chord-name no-signal';
   chordNameEl.textContent = '-- / --';
-  notesDisplayEl.innerHTML = '';
+  notesDisplayEl.innerHTML  = '';
   candidateListEl.innerHTML = '';
-
   freqCtx.clearRect(0, 0, freqCanvas.width, freqCanvas.height);
   waveCtx.clearRect(0, 0, waveCanvas.width, waveCanvas.height);
 }
