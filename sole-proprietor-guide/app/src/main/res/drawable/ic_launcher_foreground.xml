@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Open book symbol -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,38 C48,33 40,31 32,31 L32,73 C40,73 48,75 54,80 C60,75 68,73 76,73 L76,31 C68,31 60,33 54,38 Z M54,44 C58,41 63,39 72,38.5 L72,69 C64,69.5 58,71.5 54,74.5 C50,71.5 44,69.5 36,69 L36,38.5 C45,39 50,41 54,44 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M42,46 L52,46 L52,49 L42,49 Z M42,53 L52,53 L52,56 L42,56 Z M42,60 L52,60 L52,63 L42,63 Z" />
+</vector>
