@@ -4,6 +4,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.Checklist
+import androidx.compose.material.icons.filled.Handyman
 import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -35,9 +36,15 @@ private data class BottomTab(
 
 private val bottomTabs = listOf(
     BottomTab("home", "ガイド", Icons.AutoMirrored.Filled.MenuBook),
-    BottomTab("checklist", "チェックリスト", Icons.Default.Checklist),
+    BottomTab("tools", "ツール", Icons.Default.Handyman),
+    BottomTab("checklist", "チェック", Icons.Default.Checklist),
     BottomTab("glossary", "用語集", Icons.Default.Translate)
 )
+
+private val topLevelRoutes = setOf("home", "tools", "checklist", "glossary")
+
+// ツールのサブ画面はツールタブを選択状態にする
+private val toolRoutes = toolEntries.map { it.route }.toSet()
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -45,14 +52,25 @@ fun KojinGuideApp() {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = backStackEntry?.destination
+    val currentRoute = currentDestination?.route
 
     val currentCategoryId = backStackEntry?.arguments?.getString("categoryId")
     val detailCategory = currentCategoryId?.let { GuideRepository.findCategory(it) }
 
+    val showBack = currentRoute != null && currentRoute !in topLevelRoutes
+
     val title = when {
         detailCategory != null -> detailCategory.title
-        currentDestination?.route == "checklist" -> "開業チェックリスト"
-        currentDestination?.route == "glossary" -> "用語集"
+        currentRoute == "tools" -> "便利ツール"
+        currentRoute == "calculator" -> "計算機(消費税・源泉)"
+        currentRoute == "simulator" -> "税金シミュレーター"
+        currentRoute == "bookkeeping" -> "かんたん帳簿"
+        currentRoute == "invoice" -> "請求書メモ"
+        currentRoute == "expensefaq" -> "経費になる?FAQ"
+        currentRoute == "taxsaving" -> "節税チェッカー"
+        currentRoute == "schedule" -> "年間スケジュール"
+        currentRoute == "checklist" -> "開業チェックリスト"
+        currentRoute == "glossary" -> "用語集"
         else -> "個人事業主の手引き"
     }
 
@@ -61,7 +79,7 @@ fun KojinGuideApp() {
             TopAppBar(
                 title = { Text(text = title, fontWeight = FontWeight.Bold) },
                 navigationIcon = {
-                    if (detailCategory != null) {
+                    if (showBack) {
                         IconButton(onClick = { navController.popBackStack() }) {
                             Icon(
                                 Icons.AutoMirrored.Filled.ArrowBack,
@@ -79,9 +97,9 @@ fun KojinGuideApp() {
         bottomBar = {
             NavigationBar {
                 bottomTabs.forEach { tab ->
-                    val selected = currentDestination?.hierarchy
-                        ?.any { it.route == tab.route } == true ||
-                        (tab.route == "home" && detailCategory != null)
+                    val selected = currentDestination?.hierarchy?.any { it.route == tab.route } == true ||
+                        (tab.route == "home" && detailCategory != null) ||
+                        (tab.route == "tools" && currentRoute in toolRoutes)
                     NavigationBarItem(
                         selected = selected,
                         onClick = {
@@ -106,9 +124,7 @@ fun KojinGuideApp() {
         ) {
             composable("home") {
                 HomeScreen(
-                    onCategoryClick = { category ->
-                        navController.navigate("guide/${category.id}")
-                    },
+                    onCategoryClick = { category -> navController.navigate("guide/${category.id}") },
                     contentPadding = innerPadding
                 )
             }
@@ -119,12 +135,21 @@ fun KojinGuideApp() {
                     GuideDetailScreen(category = category, contentPadding = innerPadding)
                 }
             }
-            composable("checklist") {
-                ChecklistScreen(contentPadding = innerPadding)
+            composable("tools") {
+                ToolsHubScreen(
+                    onToolClick = { route -> navController.navigate(route) },
+                    contentPadding = innerPadding
+                )
             }
-            composable("glossary") {
-                GlossaryScreen(contentPadding = innerPadding)
-            }
+            composable("calculator") { CalculatorScreen(innerPadding) }
+            composable("simulator") { SimulatorScreen(innerPadding) }
+            composable("bookkeeping") { BookkeepingScreen(innerPadding) }
+            composable("invoice") { InvoiceScreen(innerPadding) }
+            composable("expensefaq") { ExpenseFaqScreen(innerPadding) }
+            composable("taxsaving") { TaxSavingScreen(innerPadding) }
+            composable("schedule") { AnnualScheduleScreen(innerPadding) }
+            composable("checklist") { ChecklistScreen(contentPadding = innerPadding) }
+            composable("glossary") { GlossaryScreen(contentPadding = innerPadding) }
         }
     }
 }
